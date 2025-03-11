@@ -1,15 +1,7 @@
-USER = 1
-HEADERS = {
-    'Content-Type': 'application/json',
-    'Accept': 'application/vnd.tasksmanager.v2'
-}
+import logging
 
-DATA = {
-    "name": "Naldo Teste",
-    "job": "leader"
-}
-
-UPDATE_USER = {
-    "name": "Naldo Teste Updated",
-    "job": "leader"
-}
+logging.basicConfig(filename='exemple.log', encoding='utf-8', level=logging.DEBUG)
+logging.debug('\nlog debug...\n')
+logging.info('\nlog info...\n')
+logging.warning('\nlog warning...\n')
+logging.error('\nlog error...\n')
