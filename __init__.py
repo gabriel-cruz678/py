@@ -1,19 +1,40 @@
-import type { Frame } from "@playwright/test";
+import type { FrameLocator, Locator } from "@playwright/test";
 
-const resolveTargetFrame = async (cssSelector: string): Promise<Frame | null> => {
-  const frames = page.frames();
+const findFrameLocatorContaining = async (cssSelector: string): Promise<FrameLocator | null> => {
+  // procura em iframes de 1º nível
+  const topCount = await page.locator("iframe").count();
 
-  for (const frame of frames) {
+  for (let i = 0; i < topCount; i++) {
+    const fl = page.frameLocator("iframe").nth(i);
+
+    // o locator aqui está dentro do frameLocator (igual seu exemplo)
     try {
-      // Usa Locator (não frame.$) porque é mais consistente e suporta shadow open
-      const count = await frame.locator(cssSelector).count();
-      if (count > 0) return frame;
-    } catch {
-      // frame pode estar navegando/indisponível momentaneamente
+      const c = await fl.locator(cssSelector).count();
+      if (c > 0) return fl;
+    } catch {}
+
+    // opcional: procura em iframes aninhados (nested)
+    const nested = await fl.locator("iframe").count();
+    for (let j = 0; j < nested; j++) {
+      const nfl = fl.frameLocator("iframe").nth(j);
+      try {
+        const c2 = await nfl.locator(cssSelector).count();
+        if (c2 > 0) return nfl;
+      } catch {}
     }
   }
 
   return null;
+};
+
+const clickLikeFrameLocator = async (loc: Locator) => {
+  await loc.waitFor({ state: "attached", timeout: 15000 });
+  await loc.waitFor({ state: "visible", timeout: 15000 });
+
+  try { await loc.scrollIntoViewIfNeeded(); } catch {}
+
+  // exatamente como você faz no teste: locator(...).click()
+  await loc.click({ timeout: 10000 });
 };
 
 locator_click: {
@@ -23,28 +44,15 @@ locator_click: {
       throw new Error("cssSelector is required to locate the element.");
     }
 
-    const targetFrame = await resolveTargetFrame(finalSelector);
+    // 1) tenta achar um frameLocator que contenha o elemento (SEM iframeSelector)
+    const frameLocator = await findFrameLocatorContaining(finalSelector);
 
-    if (targetFrame) {
-      // >>> AQUI é o equivalente ao seu: frameLocator(...).locator(...).click()
-      const locator = targetFrame.locator(finalSelector).first();
-
-      await locator.waitFor({ state: "attached", timeout: 15000 });
-      await locator.waitFor({ state: "visible", timeout: 15000 });
-
-      // garante viewport
-      try { await locator.scrollIntoViewIfNeeded(); } catch {}
-
-      await locator.click({ timeout: 10000 });
+    if (frameLocator) {
+      // 2) clique dentro do FrameLocator (replica seu comportamento)
+      await clickLikeFrameLocator(frameLocator.locator(finalSelector).first());
     } else {
-      // fallback: fora de iframe
-      const locator = page.locator(finalSelector).first();
-
-      await locator.waitFor({ state: "attached", timeout: 15000 });
-      await locator.waitFor({ state: "visible", timeout: 15000 });
-      try { await locator.scrollIntoViewIfNeeded(); } catch {}
-
-      await locator.click({ timeout: 10000 });
+      // 3) fallback fora de iframe
+      await clickLikeFrameLocator(page.locator(finalSelector).first());
     }
 
     return buildReturn(args, { success: true });
