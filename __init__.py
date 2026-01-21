@@ -1,15 +1,15 @@
-import { FrameLocator, Locator, Page } from "@playwright/test";
+import { FrameLocator, Locator } from "@playwright/test";
 
-async function findFrameLocatorForSelector(
+const findFrameLocatorForSelector = async (
   page: Page,
   cssSelector: string,
   timeout = 15000
-): Promise<FrameLocator | null> {
-
-  const iframeCount = await page.locator("iframe").count();
+): Promise<FrameLocator | null> => {
   const start = Date.now();
 
   while (Date.now() - start < timeout) {
+    const iframeCount = await page.locator("iframe").count();
+
     for (let i = 0; i < iframeCount; i++) {
       const frameLocator = page.frameLocator("iframe").nth(i);
 
@@ -19,22 +19,20 @@ async function findFrameLocatorForSelector(
           return frameLocator;
         }
       } catch {
-        // iframe ainda carregando, ignora
+        // iframe ainda carregando / navegando
       }
     }
 
-    // aguarda re-render Angular / SPA
     await page.waitForTimeout(200);
   }
 
   return null;
-}
+};
 
-async function clickUsingAutoFrameLocator(
+const clickWithFrameLocator = async (
   page: Page,
   cssSelector: string
-) {
-  // 1) tenta achar o FrameLocator certo
+) => {
   const frameLocator = await findFrameLocatorForSelector(page, cssSelector);
 
   if (frameLocator) {
@@ -47,10 +45,64 @@ async function clickUsingAutoFrameLocator(
     return;
   }
 
-  // 2) fallback: fora de iframe
+  // fallback: fora de iframe
   const locator = page.locator(cssSelector).first();
   await locator.waitFor({ state: "visible", timeout: 15000 });
   await locator.scrollIntoViewIfNeeded();
   await locator.click({ timeout: 10000 });
-}
+};
 
+
+
+locator_click: {
+  function: async (args: {
+    cssSelector?: string;
+    rawCssSelector?: string;
+    elementId?: string;
+    selector?: string;
+  }) => {
+    const cssSelector =
+      args.cssSelector ||
+      args.rawCssSelector ||
+      args.selector ||
+      args.elementId;
+
+    if (!cssSelector) {
+      throw new Error("cssSelector is required to locate the element.");
+    }
+
+    // >>> AQUI está a ligação com FrameLocator automático
+    await clickWithFrameLocator(page, cssSelector);
+
+    return { success: true };
+  },
+
+  name: "locator_click",
+  description: "Click an element using FrameLocator auto-discovery.",
+  parse: (args: string) => {
+    return z
+      .object({
+        cssSelector: z.string().optional(),
+        rawCssSelector: z.string().optional(),
+        elementId: z.string().optional(),
+        selector: z.string().optional(),
+      })
+      .refine(
+        (d) =>
+          d.cssSelector ||
+          d.rawCssSelector ||
+          d.elementId ||
+          d.selector,
+      )
+      .parse(JSON.parse(args));
+  },
+  parameters: {
+    type: "object",
+    properties: {
+      cssSelector: { type: "string" },
+      rawCssSelector: { type: "string" },
+      elementId: { type: "string" },
+      selector: { type: "string" },
+    },
+  },
+},
