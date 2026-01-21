@@ -1,14 +1,6 @@
-const origin = new URL("").origin;
-
-// geolocation prompt
-await page.context().grantPermissions(["geolocation"], { origin });
-
-// se o site usa localização real, opcional:
-await page.context().setGeolocation({ latitude: -23.5505, longitude: -46.6333 });
-
 const resolveTargetFrame = async (cssSelector: string) => {
   const frames = page.frames();
-  let targetFrame: any = null;
+  let targetFrame: Frame | null = null;
 
   for (const frame of frames) {
     try {
@@ -19,80 +11,57 @@ const resolveTargetFrame = async (cssSelector: string) => {
       }
     } catch {}
   }
+
   return targetFrame;
 };
 
-const dismissNativePromptsBestEffort = async () => {
-  // Fecha bubble nativa do Chrome (geolocation etc.)
+const clickWithFallbacks = async (getFreshLocator: () => Locator) => {
+  // Sempre pega locator "novo" (evita stale após re-render)
+  let locator = getFreshLocator().first();
+
+  await locator.waitFor({ state: "attached", timeout: 15000 });
+  await locator.waitFor({ state: "visible", timeout: 15000 });
+
+  // (1) click padrão
   try {
-    await page.keyboard.press("Escape");
-    await page.waitForTimeout(150);
-    await page.keyboard.press("Escape");
-  } catch {}
-
-  // Tenta conceder permissão (se for o caso)
-  try {
-    const origin = new URL(page.url()).origin;
-    await page.context().grantPermissions(["geolocation"], { origin });
-  } catch {}
-};
-
-const waitAppOverlaysBestEffort = async () => {
-  try {
-    await page
-      .locator("app-alert-loading-box, .loading, .spinner, .overlay, [aria-busy='true']")
-      .first()
-      .waitFor({ state: "detached", timeout: 8000 });
-  } catch {}
-};
-
-const robustClickLikeYourTemplate = async (loc: any) => {
-  await loc.waitFor({ state: "attached", timeout: 15000 });
-  await waitAppOverlaysBestEffort();
-
-  try { await loc.scrollIntoViewIfNeeded(); } catch {}
-  await loc.waitFor({ state: "visible", timeout: 15000 });
-
-  // tenta esperar habilitar (sem travar se flutuar)
-  try {
-    const start = Date.now();
-    while (Date.now() - start < 15000) {
-      if (await loc.isEnabled()) break;
-      await page.waitForTimeout(200);
-    }
-  } catch {}
-
-  // 1) normal
-  try {
-    await loc.click({ timeout: 10000 });
+    await locator.click({ timeout: 8000 });
     return;
   } catch {}
 
-  // 2) fecha prompt nativo + tenta de novo
-  await dismissNativePromptsBestEffort();
-  await waitAppOverlaysBestEffort();
+  // Re-resolve (evita stale)
+  locator = getFreshLocator().first();
 
+  // (2) click por coordenada (ignora hit-target do locator)
   try {
-    await loc.click({ timeout: 10000 });
-    return;
+    await locator.scrollIntoViewIfNeeded();
   } catch {}
 
-  // 3) trial -> click
-  try {
-    await loc.click({ trial: true, timeout: 3000 });
-    await loc.click({ timeout: 10000 });
-    return;
-  } catch {}
+  const box = await locator.boundingBox();
+  if (box) {
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
 
-  // 4) force
-  try {
-    await loc.click({ force: true, timeout: 10000 });
-    return;
-  } catch {}
+    try {
+      await page.mouse.move(x, y);
+      await page.mouse.down();
+      await page.mouse.up();
+      return;
+    } catch {}
+  }
 
-  // 5) ÚLTIMO recurso: dispara evento click no DOM (quando há interceptação “impossível”)
-  await loc.evaluate((el: any) => {
-    el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+  // Re-resolve de novo
+  locator = getFreshLocator().first();
+
+  // (3) click DOM (último recurso) - ignora interceptação de pointer
+  await locator.evaluate((el: any) => {
+    try {
+      el.click();
+      return;
+    } catch {}
+
+    el.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true, view: window }),
+    );
   });
 };
 
@@ -108,11 +77,9 @@ locator_click: {
     const targetFrame = await resolveTargetFrame(finalSelector);
 
     if (targetFrame) {
-      const loc = targetFrame.locator(finalSelector).first();
-      await robustClickLikeYourTemplate(loc);
+      await clickWithFallbacks(() => targetFrame.locator(finalSelector));
     } else {
-      const loc = page.locator(finalSelector).first();
-      await robustClickLikeYourTemplate(loc);
+      await clickWithFallbacks(() => page.locator(finalSelector));
     }
 
     return buildReturn(args, { success: true });
