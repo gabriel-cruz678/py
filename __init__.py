@@ -7,37 +7,54 @@ locator_fill: {
     selector?: string;
     rawCssSelector?: string;
   }) => {
-    const { value } = args;
-
     const cssSelector =
       args.cssSelector || args.rawCssSelector || args.selector || args.elementId;
 
     if (!cssSelector) {
       throw new Error("cssSelector is required to locate the element.");
     }
+    if (args.value === undefined) {
+      throw new Error("value is required.");
+    }
 
-    // 1) Se veio iframeSelector, usa FrameLocator
+    const timeout = 15000;
+
+    const doFill = async (locator: import("@playwright/test").Locator) => {
+      // tenta o caminho ideal
+      try {
+        await locator.waitFor({ state: "attached", timeout });
+        await locator.scrollIntoViewIfNeeded().catch(() => {});
+        await locator.fill(args.value, { timeout });
+        return;
+      } catch {
+        // fallback estilo Selenium: focar + digitar via teclado
+        await locator.waitFor({ state: "attached", timeout });
+        await locator.scrollIntoViewIfNeeded().catch(() => {});
+        await locator.click({ timeout, force: true });
+
+        // limpa e digita
+        await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
+        await page.keyboard.type(args.value);
+      }
+    };
+
+    // 1) Com iframeSelector: usa FrameLocator (igual ao seu exemplo que funciona)
     if (args.iframeSelector) {
-      const iframeLocator = page.frameLocator(args.iframeSelector);
-      const locator = iframeLocator.locator(cssSelector).first();
+      // garante que o iframe existe/está anexado
+      await page.locator(args.iframeSelector).first().waitFor({ state: "attached", timeout });
 
-      await locator.waitFor({ state: "attached", timeout: 15000 });
-      await locator.waitFor({ state: "visible", timeout: 15000 });
-      try { await locator.scrollIntoViewIfNeeded(); } catch {}
+      const locator = page
+        .frameLocator(args.iframeSelector)
+        .locator(cssSelector)
+        .first();
 
-      await locator.fill(value, { timeout: 10000 });
-
+      await doFill(locator);
       return buildReturn(args, { success: true });
     }
 
-    // 2) Sem iframe: comportamento padrão
+    // 2) Sem iframe: padrão
     const locator = page.locator(cssSelector).first();
-
-    await locator.waitFor({ state: "attached", timeout: 15000 });
-    await locator.waitFor({ state: "visible", timeout: 15000 });
-    try { await locator.scrollIntoViewIfNeeded(); } catch {}
-
-    await locator.fill(value, { timeout: 10000 });
+    await doFill(locator);
 
     return buildReturn(args, { success: true });
   },
@@ -55,8 +72,7 @@ locator_fill: {
         rawCssSelector: z.string().optional(),
       })
       .refine(
-        (d) =>
-          !!(d.cssSelector || d.rawCssSelector || d.elementId || d.selector),
+        (d) => !!(d.cssSelector || d.rawCssSelector || d.elementId || d.selector),
         { message: "cssSelector is required." },
       )
       .parse(JSON.parse(args));
