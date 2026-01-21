@@ -1,3 +1,11 @@
+const origin = new URL("").origin;
+
+// geolocation prompt
+await page.context().grantPermissions(["geolocation"], { origin });
+
+// se o site usa localização real, opcional:
+await page.context().setGeolocation({ latitude: -23.5505, longitude: -46.6333 });
+
 const resolveTargetFrame = async (cssSelector: string) => {
   const frames = page.frames();
   let targetFrame: any = null;
@@ -9,18 +17,88 @@ const resolveTargetFrame = async (cssSelector: string) => {
         targetFrame = frame;
         break;
       }
-    } catch {
-      // ignora frame não pronto/navegando
-    }
+    } catch {}
   }
-
   return targetFrame;
 };
 
+const dismissNativePromptsBestEffort = async () => {
+  // Fecha bubble nativa do Chrome (geolocation etc.)
+  try {
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(150);
+    await page.keyboard.press("Escape");
+  } catch {}
+
+  // Tenta conceder permissão (se for o caso)
+  try {
+    const origin = new URL(page.url()).origin;
+    await page.context().grantPermissions(["geolocation"], { origin });
+  } catch {}
+};
+
+const waitAppOverlaysBestEffort = async () => {
+  try {
+    await page
+      .locator("app-alert-loading-box, .loading, .spinner, .overlay, [aria-busy='true']")
+      .first()
+      .waitFor({ state: "detached", timeout: 8000 });
+  } catch {}
+};
+
+const robustClickLikeYourTemplate = async (loc: any) => {
+  await loc.waitFor({ state: "attached", timeout: 15000 });
+  await waitAppOverlaysBestEffort();
+
+  try { await loc.scrollIntoViewIfNeeded(); } catch {}
+  await loc.waitFor({ state: "visible", timeout: 15000 });
+
+  // tenta esperar habilitar (sem travar se flutuar)
+  try {
+    const start = Date.now();
+    while (Date.now() - start < 15000) {
+      if (await loc.isEnabled()) break;
+      await page.waitForTimeout(200);
+    }
+  } catch {}
+
+  // 1) normal
+  try {
+    await loc.click({ timeout: 10000 });
+    return;
+  } catch {}
+
+  // 2) fecha prompt nativo + tenta de novo
+  await dismissNativePromptsBestEffort();
+  await waitAppOverlaysBestEffort();
+
+  try {
+    await loc.click({ timeout: 10000 });
+    return;
+  } catch {}
+
+  // 3) trial -> click
+  try {
+    await loc.click({ trial: true, timeout: 3000 });
+    await loc.click({ timeout: 10000 });
+    return;
+  } catch {}
+
+  // 4) force
+  try {
+    await loc.click({ force: true, timeout: 10000 });
+    return;
+  } catch {}
+
+  // 5) ÚLTIMO recurso: dispara evento click no DOM (quando há interceptação “impossível”)
+  await loc.evaluate((el: any) => {
+    el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+  });
+};
 
 locator_click: {
   function: async (args: { cssSelector?: string; elementId?: string; selector?: string; rawCssSelector?: string }) => {
-    const { cssSelector, elementId, selector, rawCssSelector } = args;
+    const { cssSelector, rawCssSelector, elementId, selector } = args;
 
     const finalSelector = cssSelector || rawCssSelector || elementId || selector;
     if (!finalSelector) {
@@ -29,70 +107,18 @@ locator_click: {
 
     const targetFrame = await resolveTargetFrame(finalSelector);
 
-    // mesma estrutura do seu template:
     if (targetFrame) {
-      const locator = targetFrame.locator(finalSelector).first();
-
-      // robustez p/ click (overlay, interceptação, efeitos)
-      await locator.waitFor({ state: "attached", timeout: 15000 });
-      try { await locator.scrollIntoViewIfNeeded(); } catch {}
-
-      // espera ficar visível e habilitado (evita clicar em disabled)
-      await locator.waitFor({ state: "visible", timeout: 15000 });
-      // isEnabled pode falhar se elemento troca rápido, então é try
-      try {
-        const start = Date.now();
-        while (Date.now() - start < 15000) {
-          if (await locator.isEnabled()) break;
-          await page.waitForTimeout(200);
-        }
-      } catch {}
-
-      try {
-        await locator.click({ timeout: 10000 });
-      } catch {
-        // tentativa 2: trial -> click
-        try {
-          await locator.click({ trial: true, timeout: 3000 });
-          await locator.click({ timeout: 10000 });
-        } catch {
-          // tentativa 3: force (último recurso)
-          await locator.click({ force: true, timeout: 10000 });
-        }
-      }
-
+      const loc = targetFrame.locator(finalSelector).first();
+      await robustClickLikeYourTemplate(loc);
     } else {
-      const locator = page.locator(finalSelector).first();
-
-      await locator.waitFor({ state: "attached", timeout: 15000 });
-      try { await locator.scrollIntoViewIfNeeded(); } catch {}
-      await locator.waitFor({ state: "visible", timeout: 15000 });
-
-      try {
-        const start = Date.now();
-        while (Date.now() - start < 15000) {
-          if (await locator.isEnabled()) break;
-          await page.waitForTimeout(200);
-        }
-      } catch {}
-
-      try {
-        await locator.click({ timeout: 10000 });
-      } catch {
-        try {
-          await locator.click({ trial: true, timeout: 3000 });
-          await locator.click({ timeout: 10000 });
-        } catch {
-          await locator.click({ force: true, timeout: 10000 });
-        }
-      }
+      const loc = page.locator(finalSelector).first();
+      await robustClickLikeYourTemplate(loc);
     }
 
     return buildReturn(args, { success: true });
   },
-
   name: "locator_click",
-  description: "Click an element (CSS selector; supports iframes + open shadow DOM).",
+  description: "Click an element.",
   parse: (args: string) => {
     return z
       .object({
@@ -114,48 +140,3 @@ locator_click: {
     },
   },
 },
-
-locator_fill: {
-  function: async (args: { value: string; cssSelector?: string; elementId?: string; selector?: string; rawCssSelector?: string }) => {
-    const finalSelector = args.cssSelector || args.rawCssSelector || args.elementId || args.selector;
-    if (!finalSelector) throw new Error("cssSelector is required to locate the element.");
-
-    const targetFrame = await resolveTargetFrame(finalSelector);
-
-    if (targetFrame) {
-      const locator = targetFrame.locator(finalSelector).first();
-      await locator.fill(args.value);
-    } else {
-      const locator = page.locator(finalSelector).first();
-      await locator.fill(args.value);
-    }
-
-    return buildReturn(args, { success: true });
-  },
-  name: "locator_fill",
-  description: "Set a value to the input field.",
-  parse: (args: string) => {
-    return z.object({
-      value: z.string(),
-      cssSelector: z.string().optional(),
-      rawCssSelector: z.string().optional(),
-      elementId: z.string().optional(),
-      selector: z.string().optional(),
-    })
-    .refine(d => !!(d.cssSelector || d.rawCssSelector || d.elementId || d.selector))
-    .parse(JSON.parse(args));
-  },
-  parameters: {
-    type: "object",
-    properties: {
-      value: { type: "string" },
-      cssSelector: { type: "string" },
-      rawCssSelector: { type: "string" },
-      elementId: { type: "string" },
-      selector: { type: "string" },
-    },
-    required: ["value"],
-  },
-},
-
-
