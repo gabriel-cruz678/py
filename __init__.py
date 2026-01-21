@@ -1,85 +1,65 @@
-const resolveTargetFrame = async (cssSelector: string) => {
-  const frames = page.frames();
-  let targetFrame: Frame | null = null;
+import type { Frame, Locator } from "@playwright/test";
 
-  for (const frame of frames) {
+// 1) acha frame que contém o selector (sem iframeSelector)
+const resolveTargetFrame = async (cssSelector: string): Promise<Frame | null> => {
+  for (const frame of page.frames()) {
     try {
       const count = await frame.locator(cssSelector).first().count();
-      if (count > 0) {
-        targetFrame = frame;
-        break;
-      }
+      if (count > 0) return frame;
     } catch {}
   }
-
-  return targetFrame;
+  return null;
 };
 
-const clickWithFallbacks = async (getFreshLocator: () => Locator) => {
-  // Sempre pega locator "novo" (evita stale após re-render)
-  let locator = getFreshLocator().first();
+// 2) click com fallbacks (selenium-like)
+const clickSeleniumLike = async (locFactory: () => Locator) => {
+  let loc = locFactory().first();
 
-  await locator.waitFor({ state: "attached", timeout: 15000 });
-  await locator.waitFor({ state: "visible", timeout: 15000 });
+  await loc.waitFor({ state: "attached", timeout: 15000 });
+  await loc.waitFor({ state: "visible", timeout: 15000 });
 
-  // (1) click padrão
+  // tentativa A: click normal (Playwright)
   try {
-    await locator.click({ timeout: 8000 });
+    await loc.click({ timeout: 8000 });
     return;
   } catch {}
 
-  // Re-resolve (evita stale)
-  locator = getFreshLocator().first();
+  // re-resolve (evita stale após re-render)
+  loc = locFactory().first();
 
-  // (2) click por coordenada (ignora hit-target do locator)
+  // tentativa B: click por coordenada (mais parecido com Selenium)
   try {
-    await locator.scrollIntoViewIfNeeded();
+    await loc.scrollIntoViewIfNeeded();
   } catch {}
 
-  const box = await locator.boundingBox();
+  const box = await loc.boundingBox();
   if (box) {
     const x = box.x + box.width / 2;
     const y = box.y + box.height / 2;
-
     try {
-      await page.mouse.move(x, y);
-      await page.mouse.down();
-      await page.mouse.up();
+      await page.mouse.click(x, y);
       return;
     } catch {}
   }
 
-  // Re-resolve de novo
-  locator = getFreshLocator().first();
-
-  // (3) click DOM (último recurso) - ignora interceptação de pointer
-  await locator.evaluate((el: any) => {
-    try {
-      el.click();
-      return;
-    } catch {}
-
-    el.dispatchEvent(
-      new MouseEvent("click", { bubbles: true, cancelable: true, view: window }),
-    );
+  // tentativa C: DOM click (último recurso)
+  loc = locFactory().first();
+  await loc.evaluate((el: any) => {
+    el.click?.();
   });
 };
 
 locator_click: {
   function: async (args: { cssSelector?: string; elementId?: string; selector?: string; rawCssSelector?: string }) => {
-    const { cssSelector, rawCssSelector, elementId, selector } = args;
-
-    const finalSelector = cssSelector || rawCssSelector || elementId || selector;
-    if (!finalSelector) {
-      throw new Error("cssSelector is required to locate the element.");
-    }
+    const finalSelector = args.cssSelector || args.rawCssSelector || args.elementId || args.selector;
+    if (!finalSelector) throw new Error("cssSelector is required to locate the element.");
 
     const targetFrame = await resolveTargetFrame(finalSelector);
 
     if (targetFrame) {
-      await clickWithFallbacks(() => targetFrame.locator(finalSelector));
+      await clickSeleniumLike(() => targetFrame.locator(finalSelector));
     } else {
-      await clickWithFallbacks(() => page.locator(finalSelector));
+      await clickSeleniumLike(() => page.locator(finalSelector));
     }
 
     return buildReturn(args, { success: true });
