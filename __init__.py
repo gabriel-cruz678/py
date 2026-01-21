@@ -1,11 +1,14 @@
-locator_click: {
+locator_fill: {
   function: async (args: {
+    value: string;
     cssSelector?: string;
     iframeSelector?: string;
     elementId?: string;
     selector?: string;
     rawCssSelector?: string;
   }) => {
+    const { value } = args;
+
     const cssSelector =
       args.cssSelector || args.rawCssSelector || args.selector || args.elementId;
 
@@ -13,7 +16,7 @@ locator_click: {
       throw new Error("cssSelector is required to locate the element.");
     }
 
-    // 1) Se veio iframeSelector, usa FrameLocator (mesma ideia do seu exemplo funcional)
+    // 1) Se veio iframeSelector, usa FrameLocator
     if (args.iframeSelector) {
       const iframeLocator = page.frameLocator(args.iframeSelector);
       const locator = iframeLocator.locator(cssSelector).first();
@@ -22,7 +25,7 @@ locator_click: {
       await locator.waitFor({ state: "visible", timeout: 15000 });
       try { await locator.scrollIntoViewIfNeeded(); } catch {}
 
-      await locator.click({ timeout: 10000 });
+      await locator.fill(value, { timeout: 10000 });
 
       return buildReturn(args, { success: true });
     }
@@ -34,16 +37,17 @@ locator_click: {
     await locator.waitFor({ state: "visible", timeout: 15000 });
     try { await locator.scrollIntoViewIfNeeded(); } catch {}
 
-    await locator.click({ timeout: 10000 });
+    await locator.fill(value, { timeout: 10000 });
 
     return buildReturn(args, { success: true });
   },
 
-  name: "locator_click",
-  description: "Click an element (supports iframe via iframeSelector).",
+  name: "locator_fill",
+  description: "Set a value to the input field (supports iframe via iframeSelector).",
   parse: (args: string) => {
     return z
       .object({
+        value: z.string(),
         cssSelector: z.string().optional(),
         iframeSelector: z.string().optional(),
         elementId: z.string().optional(),
@@ -60,11 +64,13 @@ locator_click: {
   parameters: {
     type: "object",
     properties: {
+      value: { type: "string" },
       cssSelector: { type: "string" },
       iframeSelector: { type: "string" },
       elementId: { type: "string" },
       selector: { type: "string" },
       rawCssSelector: { type: "string" },
     },
+    required: ["value"],
   },
 },
