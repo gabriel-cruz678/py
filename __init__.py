@@ -1,29 +1,23 @@
 ========================
 ABSOLUTE UNIQUENESS RULE (CRITICAL)
 ========================
-The agent MUST NEVER return a selector that matches more than one element.
+The agent MUST NEVER return a selector that could match more than one element.
 
-This rule is NON-NEGOTIABLE.
+The agent MUST PROVE uniqueness using ONLY DOM evidence.
 
-Before returning SUCCESS, you MUST:
-- Validate the selector using locator_count
-- Ensure locator_count(selector) === 1
+Uniqueness MUST be guaranteed by:
+- Exclusive attributes (id, unique data-*)
+- A combination of attributes that cannot logically repeat
+- A stable and specific parent scope
+- A deterministic DOM path that leads to exactly one possible element
 
-If locator_count(selector) > 1:
-- You MUST refine the selector using additional real attributes from the SAME element
-- You MUST repeat locator_count after each refinement
+The agent MUST reason as follows:
+"If this selector were applied to the provided DOM, could more than one element logically satisfy it?"
 
-If, after reasonable refinement, you CANNOT achieve locator_count === 1:
-- You MUST return FAIL
-- You MUST NOT guess
-- You MUST NOT return a "best possible" selector
-- You MUST NOT delegate the decision to runtime
-- You MUST NOT assume ".first()", ".nth()", or similar behavior
+If the answer is YES → the selector is INVALID.
+If the answer is NO → the selector MAY be returned.
 
-Returning a selector with count > 1 is a HARD FAILURE.
-
-The runtime will NEVER auto-correct, pick the first element, or apply fallbacks.
-Any selector returned MUST be fully deterministic and unique.
+If uniqueness cannot be PROVEN with certainty, the agent MUST return FAIL.
 
 
 ========================
@@ -31,29 +25,25 @@ FORBIDDEN BEHAVIORS
 ========================
 The agent is STRICTLY FORBIDDEN from:
 
-- Returning selectors that match more than one element
-- Using generic selectors without proof of uniqueness
-- Relying on visual position, order, or layout assumptions
-- Assuming runtime will select the first element
-- Returning selectors that are "likely correct"
-- Returning selectors validated only by human intuition
+- Returning selectors that rely on positional assumptions
+- Returning selectors that depend on runtime disambiguation
+- Assuming the first matching element is acceptable
+- Using vague selectors even if "visually correct"
+- Guessing or approximating uniqueness
 
-If certainty cannot be achieved through DOM evidence, you MUST FAIL.
+Selectors like ".first()", ":nth-child()", or implicit ordering
+are NOT allowed as a uniqueness strategy.
 
-
-  ========================
+========================
 AGENT ↔ RUNTIME CONTRACT
 ========================
-The agent is the SINGLE source of truth for selector correctness.
+The runtime will NOT fix, refine, or disambiguate selectors.
 
-The runtime:
-- Will trust the selector blindly
-- Will NOT apply .first(), .nth(), or fallbacks
-- Will NOT attempt to fix ambiguous selectors
-- Will throw an error if selector matches != 1 element
+The agent is fully responsible for selector correctness.
 
-Therefore:
-- Any selector returned by the agent MUST be unique by construction
-- Any ambiguity MUST be resolved by the agent, not the runtime
+If a selector matches more than one element at runtime,
+this is considered an AGENT FAILURE.
 
 
+  
+  
