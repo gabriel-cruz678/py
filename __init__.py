@@ -1,12 +1,44 @@
 def transform_html(**kwargs):
     import re
+    import os
     import unicodedata
     from lxml import html as lxml_html
 
     TASK = kwargs.get("TASK")
-    HTML = kwargs.get("HTML")
+
+    # ==========================================================
+    # MUDANÇA PEDIDA: ler HTML via repositório (arquivo)
+    # - segue o mesmo estilo do exemplo (kwargs.get + open/read)
+    # - sem mudar o comportamento do filtro
+    # ==========================================================
+    html_source = kwargs.get("HTML_PATH") or kwargs.get("input_path") or kwargs.get("HTML")
+
     if not isinstance(TASK, str) or not TASK.strip():
-        return HTML if isinstance(HTML, str) else ""
+        # Mantém comportamento: se não tem task, devolve o HTML original (ou vazio se não houver)
+        if isinstance(html_source, str):
+            # Se for path e existir, devolve conteúdo; se for HTML inline, devolve inline
+            try:
+                if os.path.isfile(html_source):
+                    with open(html_source, "r", encoding="utf-8", errors="ignore") as f:
+                        return f.read()
+            except Exception:
+                pass
+            return html_source
+        return ""
+
+    if not isinstance(html_source, str) or not html_source.strip():
+        return ""
+
+    # Se for um arquivo existente, lê do repo; senão trata como HTML inline (compatibilidade)
+    HTML = html_source
+    try:
+        if os.path.isfile(html_source):
+            with open(html_source, "r", encoding="utf-8", errors="ignore") as f:
+                HTML = f.read()
+    except Exception:
+        # Se falhar a leitura, continua como estava (não muda comportamento)
+        HTML = html_source
+
     if not isinstance(HTML, str) or not HTML.strip():
         return ""
 
@@ -142,8 +174,7 @@ def transform_html(**kwargs):
             return True
         if "onclick" in attrs:
             return True
-        tabindex = attrs.get("tabindex")
-        if tabindex is not None:
+        if "tabindex" in attrs:
             return True
         if "aria-pressed" in attrs or "aria-checked" in attrs:
             return True
