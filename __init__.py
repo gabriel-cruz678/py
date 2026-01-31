@@ -1,425 +1,368 @@
-def transform_html(**kwargs):
+def resolve_css_selector(**kwargs):
     import re
-    import os
-    import unicodedata
-    from lxml import html as lxml_html
+    from dataclasses import dataclass
+    from typing import List, Optional, Tuple, Dict, Any
 
-    TASK = kwargs.get("TASK")
+    from bs4 import BeautifulSoup, Tag
 
-    # ==========================================================
-    # MUDANÇA PEDIDA: ler HTML via repositório (arquivo)
-    # - segue o mesmo estilo do exemplo (kwargs.get + open/read)
-    # - sem mudar o comportamento do filtro
-    # ==========================================================
-    html_source = kwargs.get("HTML_PATH") or kwargs.get("input_path") or kwargs.get("HTML")
+    # ----------------------------
+    # Entradas no padrão da plataforma
+    # ----------------------------
+    # Seguindo seu exemplo: input_path vem do kwargs.get("input_path")
+    input_path = kwargs.get("input_path")
+    task_text = kwargs.get("TASK") or kwargs.get("task")
 
-    if not isinstance(TASK, str) or not TASK.strip():
-        # Mantém comportamento: se não tem task, devolve o HTML original (ou vazio se não houver)
-        if isinstance(html_source, str):
-            # Se for path e existir, devolve conteúdo; se for HTML inline, devolve inline
-            try:
-                if os.path.isfile(html_source):
-                    with open(html_source, "r", encoding="utf-8", errors="ignore") as f:
-                        return f.read()
-            except Exception:
-                pass
-            return html_source
-        return ""
+    if not input_path or not task_text:
+        return {"error": "Parâmetros obrigatórios ausentes: input_path e TASK (ou task)."}
 
-    if not isinstance(html_source, str) or not html_source.strip():
-        return ""
-
-    # Se for um arquivo existente, lê do repo; senão trata como HTML inline (compatibilidade)
-    HTML = html_source
     try:
-        if os.path.isfile(html_source):
-            with open(html_source, "r", encoding="utf-8", errors="ignore") as f:
-                HTML = f.read()
-    except Exception:
-        # Se falhar a leitura, continua como estava (não muda comportamento)
-        HTML = html_source
+        with open(input_path, "r", encoding="utf-8", errors="replace") as f:
+            html = f.read()
+    except Exception as e:
+        return {"error": f"Falha ao ler arquivo HTML em input_path: {str(e)}"}
 
-    if not isinstance(HTML, str) or not HTML.strip():
-        return ""
-
-    # -----------------------------
-    # Normalização
-    # -----------------------------
-    PT_STOPWORDS = {
-        "o","a","os","as","um","uma","uns","umas",
-        "de","do","da","dos","das","em","no","na","nos","nas",
-        "para","pra","por","com","sem","sobre","entre","ate","até",
-        "e","ou","se","que","qual","quais","como","quando","onde",
-        "clico","clicar","clique","pressiono","pressionar","aperte","apertar",
-        "preencho","preencher","digito","digitar","insiro","inserir","escrevo","escrever",
-        "seleciono","selecionar","escolho","escolher",
-        "marco","marcar","desmarco","desmarcar","habilito","habilitar","desabilito","desabilitar",
-        "ativo","ativar","desativo","desativar","liga","ligar","desliga","desligar",
-        "campo","botao","botão","opcao","opção","valor",
-        "checkbox","radio","radian","switch",
-    }
-
-    def strip_accents(s: str) -> str:
-        s = unicodedata.normalize("NFKD", s)
-        return "".join(ch for ch in s if not unicodedata.combining(ch))
-
+    # ----------------------------
+    # Utilidades de normalização
+    # ----------------------------
     def norm(s: str) -> str:
-        s = (s or "").strip().lower()
-        s = strip_accents(s)
+        s = s or ""
+        s = s.strip().lower()
         s = re.sub(r"\s+", " ", s)
         return s
 
-    def extract_quoted_phrases(task: str):
-        out = []
-        for m in re.finditer(r"([\"'])(.+?)\1", task):
-            p = m.group(2).strip()
-            if p:
-                out.append(p)
-        return out
+    def visible_text(el: Tag) -> str:
+        return norm(el.get_text(" ", strip=True))
 
-    def extract_keywords(task: str):
-        t = norm(task)
-        raw = re.findall(r"[a-z0-9][a-z0-9_\-\.]{1,}", t)
-        quoted = [norm(x) for x in extract_quoted_phrases(task)]
-        seen = set()
-        out = []
-        for w in raw:
-            if w in PT_STOPWORDS:
-                continue
-            if len(w) < 2:
-                continue
-            if w not in seen:
-                out.append(w)
-                seen.add(w)
-        for q in quoted:
-            if q and q not in seen:
-                out.insert(0, q)
-                seen.add(q)
-        return out
+    def safe_css_ident(value: str) -> bool:
+        return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9\-_:.]*", value or ""))
 
-    # -----------------------------
-    # Intenção
-    # -----------------------------
-    INTENT_PATTERNS = {
-        "click": [
-            r"\b(clic(ar|o|que|ke|k)|clique)\b", r"\bpression(ar|o|e)\b", r"\baperte\b", r"\btoque\b",
-            r"\babri(r|o)\b", r"\bentr(ar|o)\b"
-        ],
-        "fill": [
-            r"\bpreench(er|o|a)\b", r"\bdigit(ar|o|e)\b", r"\binsir(o|a|ir)\b",
-            r"\bescrev(o|a|er)\b", r"\binform(e|ar)\b"
-        ],
-        "select": [
-            r"\bselecion(ar|o|e)\b", r"\bescolh(er|o|a)\b", r"\bdefin(ir|o)\b.*\bvalor\b"
-        ],
-        "check": [
-            r"\bmarc(ar|o|e)\b", r"\bhabilit(ar|o|e)\b", r"\bativ(ar|o|e)\b", r"\blig(ar|o|a)\b", r"\bcheck\b"
-        ],
-        "uncheck": [
-            r"\bdesmarc(ar|o|e)\b", r"\bdesabilit(ar|o|e)\b", r"\bdesativ(ar|o|e)\b", r"\bdeslig(ar|o|a)\b", r"\buncheck\b"
-        ],
-    }
+    def css_attr_equals(attr: str, value: str) -> str:
+        v = (value or "").replace('"', '\\"')
+        return f'[{attr}="{v}"]'
 
-    def detect_intents(task: str):
-        t = norm(task)
-        intents = set()
-        for intent, pats in INTENT_PATTERNS.items():
-            for p in pats:
-                if re.search(p, t):
-                    intents.add(intent)
-                    break
-        if not intents:
-            intents.add("click")
-        return intents
+    # ----------------------------
+    # Modelo de Task
+    # ----------------------------
+    @dataclass
+    class Task:
+        action: str               # "click" | "fill"
+        target_kind: str          # "button" | "field"
+        target_name: str          # "acessar" | "senha" | etc
+        fill_value: Optional[str] = None
 
-    intents = detect_intents(TASK)
-    keywords = extract_keywords(TASK)
+    TASK_CLICK_PATTERNS = [
+        re.compile(r"^\s*(?:eu\s*)?(?:clico|clique|clicar|pressiono|aperte)\s+(?:no|na|em)\s+(?:bot[aã]o|link)\s+(.+?)\s*$", re.I),
+        re.compile(r"^\s*(?:eu\s*)?(?:clico|clique|clicar|pressiono|aperte)\s+(?:no|na|em)\s+(.+?)\s*$", re.I),
+    ]
 
-    # -----------------------------
-    # Parse HTML
-    # -----------------------------
-    try:
-        root = lxml_html.fromstring(HTML)
-    except Exception:
-        root = lxml_html.fromstring(f"<html><body>{HTML}</body></html>")
+    TASK_FILL_PATTERNS = [
+        re.compile(r"^\s*(?:eu\s*)?(?:preencho|preencha|digito|insiro|informo|coloco)\s+(?:o|a)\s+(?:campo|input|caixa|textarea)\s+(.+?)\s+(?:com|=)\s*(?:o\s*valor\s*)?(.+?)\s*$", re.I),
+        re.compile(r"^\s*(?:eu\s*)?(?:preencho|preencha|digito|insiro|informo|coloco)\s+(.+?)\s+(?:com|=)\s*(.+?)\s*$", re.I),
+    ]
 
-    # remove ruído
-    for bad in root.xpath("//script|//style|//noscript"):
-        parent = bad.getparent()
-        if parent is not None:
-            parent.remove(bad)
-    for c in root.xpath("//comment()"):
-        p = c.getparent()
-        if p is not None:
-            p.remove(c)
+    def parse_task(text: str) -> Task:
+        t = text.strip()
 
-    # -----------------------------
-    # Regras de candidatos
-    # -----------------------------
-    MATCH_ATTRS = (
-        "id","name","value","placeholder","title","aria-label","aria-labelledby","aria-describedby",
-        "data-testid","data-test","data-qa","data-cy","for","href","src","alt","role","type"
-    )
+        for pat in TASK_FILL_PATTERNS:
+            m = pat.match(t)
+            if m:
+                field = norm(m.group(1))
+                val = m.group(2).strip()
+                return Task(action="fill", target_kind="field", target_name=field, fill_value=val)
 
-    def element_text(el):
-        try:
-            return " ".join(el.itertext())
-        except Exception:
-            return ""
+        for pat in TASK_CLICK_PATTERNS:
+            m = pat.match(t)
+            if m:
+                name = norm(m.group(1))
+                return Task(action="click", target_kind="button", target_name=name)
 
-    def has_interactive_signals(el):
-        attrs = el.attrib or {}
-        role = (attrs.get("role") or "").lower()
-        if role in {"button","link","checkbox","radio","switch","combobox","listbox","menuitem","tab"}:
-            return True
-        if "onclick" in attrs:
-            return True
-        if "tabindex" in attrs:
-            return True
-        if "aria-pressed" in attrs or "aria-checked" in attrs:
-            return True
-        if (attrs.get("aria-haspopup") or "").lower() in {"listbox","menu"}:
-            return True
-        return False
+        raise ValueError(
+            "Não consegui entender a task. Exemplos aceitos: "
+            '"Clico no botão Acessar", "Preencho o campo senha com o valor XPTO".'
+        )
 
-    def is_click_candidate(el):
-        tag = (el.tag or "").lower()
-        attrs = el.attrib or {}
-        if tag in {"button","a","summary","label"}:
-            return True
-        if tag == "input":
-            t = (attrs.get("type") or "text").lower()
-            return t in {"button","submit","reset","image","checkbox","radio"}
-        if has_interactive_signals(el):
-            return True
-        if "href" in attrs:
-            return True
-        return False
+    # ----------------------------
+    # Busca de candidatos (determinística)
+    # ----------------------------
+    CLICKABLE_INPUT_TYPES = {"button", "submit", "reset", "image"}
+    FIELD_TAGS = {"input", "textarea", "select"}
+    FIELD_INVALID_TYPES = {"hidden", "submit", "button", "reset", "image", "file"}
 
-    def is_fill_candidate(el):
-        tag = (el.tag or "").lower()
-        attrs = el.attrib or {}
-        if tag == "textarea":
-            return True
-        if tag == "input":
-            t = (attrs.get("type") or "text").lower()
-            return t in {
-                "text","email","password","number","search","tel","url","date","datetime-local",
-                "month","week","time","color"
-            }
-        ce = (attrs.get("contenteditable") or "").lower()
-        if ce in {"true","", "plaintext-only"}:
-            return True
-        return False
-
-    def is_select_candidate(el):
-        tag = (el.tag or "").lower()
-        attrs = el.attrib or {}
-        role = (attrs.get("role") or "").lower()
-        if tag == "select":
-            return True
-        if role in {"combobox","listbox"}:
-            return True
-        if tag == "input" and "list" in attrs:
-            return True
-        if (attrs.get("aria-haspopup") or "").lower() in {"listbox","menu"}:
-            return True
-        return False
-
-    def is_check_candidate(el):
-        tag = (el.tag or "").lower()
-        attrs = el.attrib or {}
-        if tag == "input":
-            t = (attrs.get("type") or "").lower()
-            return t in {"checkbox","radio"}
-        role = (attrs.get("role") or "").lower()
-        if role in {"checkbox","radio","switch"}:
-            return True
-        if "aria-checked" in attrs:
-            return True
-        return False
-
-    def strong_match_score(el, keys):
-        if not keys:
-            return 0
-        attrs = el.attrib or {}
-        hay_parts = []
-        for a in MATCH_ATTRS:
-            v = attrs.get(a)
-            if v:
-                hay_parts.append(str(v))
-        cls = attrs.get("class")
-        if cls:
-            hay_parts.append(cls)
-        txt = element_text(el)
-        if txt:
-            hay_parts.append(txt)
-        hay = norm(" ".join(hay_parts))
-        score = 0
-        for k in keys:
-            kk = norm(k)
-            if not kk:
-                continue
-            if " " in kk:
-                if kk in hay:
-                    score += 10
-            else:
-                if kk in hay:
-                    score += 4
-        return score
-
-    def is_declarative_shadow_template(el):
-        if (el.tag or "").lower() != "template":
+    def element_is_clickable(el: Tag) -> bool:
+        if not isinstance(el, Tag):
             return False
-        attrs = el.attrib or {}
-        return any(k.lower() in ("shadowrootmode", "shadowroot") for k in attrs.keys())
+        tag = (el.name or "").lower()
+        if tag == "button":
+            return True
+        if tag == "a":
+            return bool(el.get("href")) or norm(el.get("role")) == "button"
+        if tag == "input":
+            t = norm(el.get("type") or "text")
+            return t in CLICKABLE_INPUT_TYPES
+        if norm(el.get("role")) == "button":
+            return True
+        return False
 
-    # -----------------------------
-    # Redução de atributos
-    # -----------------------------
-    def trim_class(value, max_tokens=6):
-        toks = re.split(r"\s+", (value or "").strip())
-        toks = [t for t in toks if t]
-        if len(toks) <= max_tokens:
-            return " ".join(toks)
-        return " ".join(toks[:max_tokens])
-
-    def shrink_attributes(el, max_attr_len=180, keep_class_tokens=6):
-        attrs = dict(el.attrib or {})
-        new_attrs = {}
-        for k, v in attrs.items():
-            lk = k.lower()
-            if lk == "style":
-                continue
-            if lk.startswith("on") and lk != "onclick":
-                continue
-            keep = False
-            if lk in MATCH_ATTRS:
-                keep = True
-            if lk.startswith("aria-") or lk.startswith("data-"):
-                keep = True
-            if lk == "srcdoc":
-                keep = True
-            if not keep:
-                continue
-
-            vv = str(v)
-            if lk == "class":
-                vv = trim_class(vv, keep_class_tokens)
-            if lk == "srcdoc":
-                vv = vv[: max_attr_len * 5]
-            if len(vv) > max_attr_len:
-                vv = vv[:max_attr_len]
-
-            new_attrs[k] = vv
-
-        el.attrib.clear()
-        el.attrib.update(new_attrs)
-
-    # -----------------------------
-    # Coleta candidatos + scoring + fallback
-    # -----------------------------
-    MAX_KEPT = 3500
-    MIN_KEPT = 25
-
-    always_keep = set()
-    for el in root.xpath("//iframe|//frame|//frameset"):
-        always_keep.add(el)
-    for el in root.xpath("//template"):
-        if is_declarative_shadow_template(el):
-            always_keep.add(el)
-
-    candidates = []
-    for el in root.iter():
-        if not isinstance(el.tag, str):
-            continue
-        tag = el.tag.lower()
-        if tag in {"html","head","body"}:
-            continue
-
-        if el in always_keep:
-            candidates.append((el, 9999))
-            continue
-
-        is_cand = False
-        intent_weight = 0
-
-        if "fill" in intents and is_fill_candidate(el):
-            is_cand = True
-            intent_weight = max(intent_weight, 50)
-        if "select" in intents and is_select_candidate(el):
-            is_cand = True
-            intent_weight = max(intent_weight, 55)
-        if ("check" in intents or "uncheck" in intents) and is_check_candidate(el):
-            is_cand = True
-            intent_weight = max(intent_weight, 60)
-        if "click" in intents and is_click_candidate(el):
-            is_cand = True
-            intent_weight = max(intent_weight, 45)
-
-        score_terms = strong_match_score(el, keywords)
-
-        if not is_cand and has_interactive_signals(el):
-            is_cand = True
-            intent_weight = max(intent_weight, 35)
-
-        if is_cand or score_terms >= 8:
-            candidates.append((el, intent_weight + score_terms))
-
-    candidates.sort(key=lambda x: x[1], reverse=True)
-
-    kept = set()
-    strong_threshold = 60 if keywords else 45
-
-    for el, sc in candidates:
-        if sc >= strong_threshold:
-            kept.add(el)
-            if len(kept) >= MAX_KEPT:
-                break
-
-    if len(kept) < MIN_KEPT:
-        for el, sc in candidates:
-            kept.add(el)
-            if len(kept) >= min(MAX_KEPT, 250):
-                break
-
-    if len(kept) < MIN_KEPT and candidates:
-        for el, sc in candidates:
-            kept.add(el)
-            if len(kept) >= min(MAX_KEPT, 1200):
-                break
-
-    # preservar pais
-    def add_ancestors(el):
-        p = el.getparent()
-        while p is not None and isinstance(p.tag, str):
-            kept.add(p)
-            p = p.getparent()
-
-    for el in list(kept):
-        add_ancestors(el)
-
-    # embrulhar em html/body se necessário
-    if (root.tag or "").lower() != "html":
-        wrapper = lxml_html.fromstring("<html><head></head><body></body></html>")
-        body = wrapper.xpath("//body")[0]
-        body.append(root)
-        root = wrapper
-
-    # prune
-    def prune(node):
-        if node not in kept and node.tag not in ("html","head","body"):
+    def element_is_field(el: Tag) -> bool:
+        if not isinstance(el, Tag):
             return False
-        for child in list(node):
-            if not isinstance(child.tag, str):
-                node.remove(child)
-                continue
-            if not prune(child):
-                node.remove(child)
-        if isinstance(node.tag, str):
-            shrink_attributes(node)
+        tag = (el.name or "").lower()
+        if tag not in FIELD_TAGS:
+            return False
+        if tag == "input":
+            t = norm(el.get("type") or "text")
+            if t in FIELD_INVALID_TYPES:
+                return False
         return True
 
-    prune(root)
+    def label_text_for_field(soup: BeautifulSoup, field: Tag) -> List[str]:
+        texts = []
+        fid = field.get("id")
+        if fid:
+            for lab in soup.find_all("label", attrs={"for": fid}):
+                lt = visible_text(lab)
+                if lt:
+                    texts.append(lt)
 
-    return lxml_html.tostring(root, encoding="unicode", method="html")
+        parent = field.parent
+        while parent and isinstance(parent, Tag):
+            if (parent.name or "").lower() == "label":
+                lt = visible_text(parent)
+                if lt:
+                    texts.append(lt)
+                break
+            parent = parent.parent
+
+        return list(dict.fromkeys(texts))
+
+    def candidate_score_click(el: Tag, target: str) -> int:
+        target_n = norm(target)
+        score = 0
+
+        txt = visible_text(el)
+        if txt == target_n:
+            score += 100
+        elif target_n and target_n in txt:
+            score += 60
+
+        for attr, w_exact, w_sub in [
+            ("aria-label", 90, 50),
+            ("title", 70, 40),
+            ("value", 80, 45),
+            ("name", 25, 10),
+            ("id", 20, 8),
+        ]:
+            v = norm(el.get(attr) or "")
+            if not v:
+                continue
+            if v == target_n:
+                score += w_exact
+            elif target_n and target_n in v:
+                score += w_sub
+
+        if norm(el.get("role")) == "button" and target_n and (target_n in txt):
+            score += 10
+
+        return score
+
+    def candidate_score_field(soup: BeautifulSoup, el: Tag, target: str) -> int:
+        target_n = norm(target)
+        score = 0
+
+        for attr, w_exact, w_sub in [
+            ("placeholder", 95, 55),
+            ("aria-label", 95, 55),
+            ("name", 80, 40),
+            ("id", 70, 35),
+            ("autocomplete", 20, 8),
+        ]:
+            v = norm(el.get(attr) or "")
+            if not v:
+                continue
+            if v == target_n:
+                score += w_exact
+            elif target_n and target_n in v:
+                score += w_sub
+
+        for lt in label_text_for_field(soup, el):
+            if lt == target_n:
+                score += 120
+            elif target_n and target_n in lt:
+                score += 70
+
+        return score
+
+    def find_candidates(soup: BeautifulSoup, task: Task) -> List[Tuple[Tag, int, Dict[str, Any]]]:
+        candidates = []
+        target = task.target_name
+
+        if task.action == "click":
+            for el in soup.find_all(True):
+                if not element_is_clickable(el):
+                    continue
+                sc = candidate_score_click(el, target)
+                if sc > 0:
+                    candidates.append((el, sc, {"match": "click"}))
+
+        elif task.action == "fill":
+            for el in soup.find_all(FIELD_TAGS):
+                if not element_is_field(el):
+                    continue
+                sc = candidate_score_field(soup, el, target)
+                if sc > 0:
+                    candidates.append((el, sc, {"match": "fill"}))
+
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return candidates
+
+    # ----------------------------
+    # Geração de CSS selector único
+    # ----------------------------
+    PREFERRED_TEST_ATTRS = ["data-testid", "data-test", "data-qa", "data-cy"]
+
+    def unique_select(soup: BeautifulSoup, selector: str) -> List[Tag]:
+        try:
+            return soup.select(selector)
+        except Exception:
+            return []
+
+    def selector_is_unique(soup: BeautifulSoup, selector: str, el: Tag) -> bool:
+        matches = unique_select(soup, selector)
+        return len(matches) == 1 and matches[0] is el
+
+    def build_selector_from_attrs(soup: BeautifulSoup, el: Tag) -> Optional[str]:
+        tag = el.name.lower()
+
+        _id = el.get("id")
+        if _id and safe_css_ident(_id):
+            sel = f"{tag}#{_id}"
+            if selector_is_unique(soup, sel, el):
+                return sel
+            sel = f"#{_id}"
+            if selector_is_unique(soup, sel, el):
+                return sel
+
+        for a in PREFERRED_TEST_ATTRS:
+            v = el.get(a)
+            if v:
+                sel = f"{tag}{css_attr_equals(a, v)}"
+                if selector_is_unique(soup, sel, el):
+                    return sel
+                sel = f"{css_attr_equals(a, v)}"
+                if selector_is_unique(soup, sel, el):
+                    return sel
+
+        nm = el.get("name")
+        if nm:
+            sel = f"{tag}{css_attr_equals('name', nm)}"
+            if selector_is_unique(soup, sel, el):
+                return sel
+
+        for a in ["aria-label", "placeholder", "title", "value"]:
+            v = el.get(a)
+            if v:
+                sel = f"{tag}{css_attr_equals(a, v)}"
+                if selector_is_unique(soup, sel, el):
+                    return sel
+
+        classes = el.get("class") or []
+        for c in classes:
+            if safe_css_ident(c):
+                sel = f"{tag}.{c}"
+                if selector_is_unique(soup, sel, el):
+                    return sel
+
+        return None
+
+    def build_structural_selector(soup: BeautifulSoup, el: Tag, max_depth: int = 6) -> Optional[str]:
+        chain = []
+        cur = el
+        depth = 0
+
+        while cur and isinstance(cur, Tag) and depth < max_depth:
+            tag = cur.name.lower()
+
+            anchor = build_selector_from_attrs(soup, cur)
+            if anchor:
+                chain.append((anchor, None))
+                break
+
+            parent = cur.parent if isinstance(cur.parent, Tag) else None
+            if not parent:
+                chain.append((tag, None))
+                break
+
+            siblings_same = [s for s in parent.find_all(tag, recursive=False)]
+            idx = 1
+            for i, s in enumerate(siblings_same, start=1):
+                if s is cur:
+                    idx = i
+                    break
+            step = f"{tag}:nth-of-type({idx})"
+            chain.append((step, None))
+
+            cur = parent
+            depth += 1
+
+        sel = " > ".join([x[0] for x in reversed(chain)])
+        if selector_is_unique(soup, sel, el):
+            return sel
+
+        return None
+
+    def build_unique_selector(soup: BeautifulSoup, el: Tag) -> Optional[str]:
+        sel = build_selector_from_attrs(soup, el)
+        if sel:
+            return sel
+        sel = build_structural_selector(soup, el)
+        if sel:
+            return sel
+        return None
+
+    # ----------------------------
+    # Verificação de correspondência com a Task
+    # ----------------------------
+    def matches_task(soup: BeautifulSoup, el: Tag, task: Task) -> bool:
+        if task.action == "click":
+            return element_is_clickable(el)
+        if task.action == "fill":
+            return element_is_field(el)
+        return False
+
+    # ----------------------------
+    # Resolvedor principal
+    # ----------------------------
+    class ResolutionError(Exception):
+        pass
+
+    def resolve_selector(html: str, task_text: str) -> str:
+        soup = BeautifulSoup(html, "html.parser")
+        task = parse_task(task_text)
+
+        cands = find_candidates(soup, task)
+        if not cands:
+            raise ResolutionError("Nenhum candidato encontrado que corresponda ao alvo descrito na task.")
+
+        cands = [(el, sc, meta) for (el, sc, meta) in cands if matches_task(soup, el, task)]
+        if not cands:
+            raise ResolutionError("Encontrei possíveis matches por texto/atributos, mas nenhum satisfaz o tipo de ação (click/fill).")
+
+        for el, sc, meta in cands[:50]:
+            sel = build_unique_selector(soup, el)
+            if not sel:
+                continue
+            matches = unique_select(soup, sel)
+            if len(matches) != 1 or matches[0] is not el:
+                continue
+            return sel
+
+        raise ResolutionError("Encontrei candidatos, mas não consegui gerar um CSS selector único e estável para o elemento correto.")
+
+    # ----------------------------
+    # Execução no padrão da plataforma
+    # ----------------------------
+    try:
+        selector = resolve_selector(html, task_text)
+        return {"selector": selector}
+    except Exception as e:
+        return {"error": str(e)}
